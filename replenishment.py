@@ -3,12 +3,10 @@ import pandas as pd
 from datetime import datetime, timedelta
 import glob
 import numpy as np
-from google.colab import drive
 import time
 import os
-
+BASE_DIR = os.path.expanduser("~/Desktop/Kindling_Replen")
 n=1
-drive.mount('/content/drive')
 
 while n>0:
     lead = [4,4,6,5,6,0,0]
@@ -209,7 +207,7 @@ while n>0:
 
     df = pd.DataFrame(all_data)
     print(df.sample(50))
-    supplier_skus_path = "/content/drive/My Drive/replenishment/update_always.xlsx"
+    supplier_skus_path = "update_always.xlsx"
     supplier_skus_df = pd.read_excel(supplier_skus_path, sheet_name="Sheet1")
 
     supplier_skus_df.rename(columns={"SKU": "Product SKU"}, inplace=True)
@@ -231,11 +229,11 @@ while n>0:
 
     sales_data = sales_df
     inventory_data = inventory_df
-    assortment_data = pd.read_excel("/content/drive/My Drive/replenishment/STORE ITEM COMBINATION MASTER FILE (20).xlsx")
-    ocs_catalog_data = pd.read_excel("/content/drive/My Drive/replenishment/OCS_Catalogue_05_Jan_2026_844AM.xlsx")
-    delist_data = pd.read_excel("/content/drive/My Drive/replenishment/Overall_Delist.xlsx")
-    ocs_export = pd.read_excel("/content/drive/My Drive/replenishment/OrderExport_05_Jan_2026_845AM_Packs.xlsx")
-    products_add = pd.read_excel("/content/drive/My Drive/replenishment/add.xlsx")
+    assortment_data = pd.read_excel(f"{BASE_DIR}/STORE ITEM COMBINATION MASTER FILE (20).xlsx")
+    ocs_catalog_data = pd.read_excel(f"{BASE_DIR}/OCS_Catalogue_18_Dec_2025_936AM.xlsx")
+    delist_data = pd.read_excel(f"{BASE_DIR}/Overall_Delist.xlsx")
+    ocs_export = pd.read_excel(f"{BASE_DIR}/OrderExport_18_Dec_2025_935AM_Packs.xlsx")
+    products_add = pd.read_excel(f"{BASE_DIR}/add.xlsx")
     products_data = products_add
     # Mark Flow-Through items
     ocs_catalog_data['Stock Status'] = np.where(
@@ -321,7 +319,7 @@ while n>0:
 
     merged_data["Order Cost"] = merged_data["Packs to Order"] * merged_data["Min Order Qty"] * merged_data["Order Cost"]*merged_data["Stock Status"].eq('YES').mul(1)
 
-    merged_data.to_excel("/content/drive/My Drive/replenishment/merged_data.xlsx", index=False)
+    merged_data.to_excel("merged_data.xlsx", index=False)
 
     location_mapping = {
         "369139": "Toronto West (Dundas)",
@@ -371,7 +369,7 @@ while n>0:
         # Keep only those NOT in inventory_data
         filtered = merged[merged['_merge'] == 'left_only']
 
-        # Drop the merge indicator column
+        # Drop the merge indicator columnopenpyxl
         filtered = filtered.drop(columns=['_merge'])
 
         return filtered
@@ -379,16 +377,16 @@ while n>0:
 
     # Step 3: Combine
     final_data = pd.concat([final_data, filtered_products], ignore_index=True)
-    final_data.to_excel("/content/drive/My Drive/replenishment/final_data.xlsx", index=False)
+    final_data.to_excel("final_data.xlsx", index=False)
     # Optional check
-    base_path1 = "/content/drive/My Drive/replenishment/dundas/"
-    base_path2 = "/content/drive/My Drive/replenishment/pine/"
-    base_path3 = "/content/drive/My Drive/replenishment/lakeshore/"
-    base_path4 = "/content/drive/My Drive/replenishment/leaside/"
-    base_path5 = "/content/drive/My Drive/replenishment/mary/"
-    base_path6 = "/content/drive/My Drive/replenishment/simcoe/"
-    base_path7 = "/content/drive/My Drive/replenishment/mountainside/"
-    base_path8 = "/content/drive/My Drive/replenishment/beaches/"
+    base_path1 = f"{BASE_DIR}/dundas/"
+    base_path2 = f"{BASE_DIR}/pine/"
+    base_path3 = f"{BASE_DIR}/lakeshore/"
+    base_path4 = f"{BASE_DIR}/leaside/"
+    base_path5 = f"{BASE_DIR}/mary/"
+    base_path6 = f"{BASE_DIR}/simcoe/"
+    base_path7 = f"{BASE_DIR}/mountainside/"
+    base_path8 = f"{BASE_DIR}/beaches/"
 
     todays = datetime.today()
     weeks = todays.isocalendar()[1]
