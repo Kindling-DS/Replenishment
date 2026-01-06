@@ -1,0 +1,9 @@
+pandas
+numpy
+requests
+selenium
+chromedriver-autoinstaller
+openpyxl
+python-dotenv
+sqlalchemy
+mysql-connector-python
