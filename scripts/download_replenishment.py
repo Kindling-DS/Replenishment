@@ -1,13 +1,31 @@
-import sys
-from pathlib import Path
+#!/usr/bin/env python3
+"""
+download_replenishment.py
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+OCS automation:
+- Logs into https://www.ocswholesale.ca/Admin/Signin
+- Selects store portal
+- Opens cart
+- Downloads:
+    1) Order Template (btnExportOrder)
+    2) Catalogue (EXPORT CATALOGUE -> START EXPORT)
+- Saves both Excel files into config.settings.DOWNLOAD_DIR
+
+Ubuntu 24.04 LTS notes:
+- This is designed to work reliably with Google Chrome (.deb) installed:
+    /usr/bin/google-chrome
+- Uses Selenium Manager (Selenium 4.6+) to resolve the matching driver automatically.
+"""
 
 import os
+import sys
 import time
 import glob
-import chromedriver_autoinstaller
+from pathlib import Path
+
+# ---- Ensure project root is on sys.path (fixes "No module named config") ----
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -15,85 +33,107 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-from selenium.webdriver.chrome.service import Service
-
 from config.settings import DOWNLOAD_DIR, logger
 from config.secrets import OCS_EMAIL, OCS_PASSWORD
 
 
-def _assert_creds():
+OCS_SIGNIN_URL = "https://www.ocswholesale.ca/Admin/Signin"
+
+
+def _assert_creds() -> None:
     if not OCS_EMAIL or not OCS_PASSWORD:
-        raise RuntimeError("Missing OCS_EMAIL or OCS_PASSWORD (set environment variables)")
+        raise RuntimeError(
+            "Missing OCS credentials. Set env vars OCS_EMAIL and OCS_PASSWORD "
+            "(and ensure config/secrets.py loads them)."
+        )
 
 
-def _clean_previous_xlsx(download_dir: str) -> None:
-    """Optional: remove old xlsx files so we can reliably detect the new downloads."""
-    for f in glob.glob(os.path.join(download_dir, "*.xlsx")):
-        try:
-            os.remove(f)
-        except OSError:
-            pass
+def _latest_mtime(path_glob: str) -> float:
+    paths = glob.glob(path_glob)
+    return max((os.path.getmtime(p) for p in paths), default=0.0)
 
 
-def _wait_for_new_xlsx(download_dir: str, timeout: int = 180) -> str:
+def _wait_for_new_xlsx(download_dir: str, since_mtime: float, timeout: int = 240) -> str:
     """
-    Wait for a new .xlsx file to appear and finish downloading (no .crdownload).
-    Returns the full path of the latest .xlsx file.
+    Wait until a NEW .xlsx appears in download_dir after since_mtime, and download completes
+    (no *.crdownload present).
+    Returns full path to the newest completed xlsx.
     """
     start = time.time()
     while time.time() - start < timeout:
         time.sleep(1)
 
-        # Ignore temporary Chrome download files
-        crdownloads = glob.glob(os.path.join(download_dir, "*.crdownload"))
-        xlsx_files = glob.glob(os.path.join(download_dir, "*.xlsx"))
+        # Chrome temp downloads
+        if glob.glob(os.path.join(download_dir, "*.crdownload")):
+            continue
 
-        if xlsx_files and not crdownloads:
-            # Pick most recently modified xlsx
-            latest = max(xlsx_files, key=os.path.getmtime)
-            return latest
+        xlsx_files = glob.glob(os.path.join(download_dir, "*.xlsx"))
+        if not xlsx_files:
+            continue
+
+        newest = max(xlsx_files, key=os.path.getmtime)
+        if os.path.getmtime(newest) > since_mtime:
+            return newest
 
     raise TimeoutError(f"Download did not complete within {timeout} seconds")
 
 
-def run():
-    """
-    Logs into OCS wholesale portal and downloads:
-      1) Order Template (btnExportOrder)
-      2) Catalogue (EXPORT CATALOGUE -> START EXPORT)
-    Saves both to DOWNLOAD_DIR and returns a dict of file paths.
-    """
-    _assert_creds()
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+def _make_driver(download_dir: str) -> webdriver.Chrome:
+    os.makedirs(download_dir, exist_ok=True)
 
-    # Remove old xlsx to make "latest file" detection unambiguous
-    _clean_previous_xlsx(DOWNLOAD_DIR)
+    opts = Options()
 
-    chromedriver_autoinstaller.install()
+    # Prefer Google Chrome .deb on Ubuntu 24.04 (more stable than Snap Chromium for Selenium)
+    # If you don't have it installed, run:
+    #   sudo apt install ./google-chrome-stable_current_amd64.deb
+    opts.binary_location = "/usr/bin/google-chrome"
 
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_experimental_option(
+    # Headless stability flags
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1920,1080")
+
+    # Fix common "DevToolsActivePort file doesn't exist" by using a writable profile
+    opts.add_argument("--user-data-dir=/tmp/ocs-chrome-profile")
+    opts.add_argument("--remote-debugging-port=9222")
+
+    # Downloads
+    opts.add_experimental_option(
         "prefs",
         {
-            "download.default_directory": DOWNLOAD_DIR,
+            "download.default_directory": download_dir,
             "download.prompt_for_download": False,
             "download.directory_upgrade": True,
             "safebrowsing.enabled": True,
         },
     )
 
-    driver = webdriver.Chrome(options=chrome_options)
+    # Selenium Manager will resolve a compatible chromedriver automatically.
+    return webdriver.Chrome(options=opts)
+
+
+def run() -> dict:
+    """
+    Returns:
+      {
+        "order_template_path": "...",
+        "order_template_name": "...",
+        "catalogue_path": "...",
+        "catalogue_name": "..."
+      }
+    """
+    _assert_creds()
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+    driver = _make_driver(DOWNLOAD_DIR)
     wait = WebDriverWait(driver, 30)
 
     try:
         # ---------------- LOGIN ----------------
-        signin_url = "https://www.ocswholesale.ca/Admin/Signin"
-        driver.get(signin_url)
-        logger.info(f"Opened signin page: {signin_url}")
+        driver.get(OCS_SIGNIN_URL)
+        logger.info(f"Opened signin page: {OCS_SIGNIN_URL}")
 
         wait.until(EC.presence_of_element_located((By.ID, "Email"))).send_keys(OCS_EMAIL)
         driver.find_element(By.ID, "password").send_keys(OCS_PASSWORD)
@@ -105,15 +145,13 @@ def run():
         store_address = driver.find_element(By.ID, "hdnShortAddress").get_attribute("value")
         logger.info(f"Store address detected: {store_address}")
 
-        select_button = wait.until(EC.element_to_be_clickable((By.LINK_TEXT, "SELECT")))
-        select_button.click()
+        wait.until(EC.element_to_be_clickable((By.LINK_TEXT, "SELECT"))).click()
         logger.info("Clicked SELECT")
 
-        store_login_button = wait.until(EC.element_to_be_clickable((By.ID, "btnSubmit")))
-        store_login_button.click()
+        wait.until(EC.element_to_be_clickable((By.ID, "btnSubmit"))).click()
         logger.info("Clicked store portal submit")
 
-        # Wait for active cart button and click
+        # Open cart
         cart_button = wait.until(
             EC.presence_of_element_located(
                 (By.CSS_SELECTOR, "#btnCartWithItemCount.shopping-icn.active")
@@ -123,15 +161,21 @@ def run():
         logger.info("Opened active cart")
 
         # ---------------- EXPORT ORDER TEMPLATE ----------------
+        before = _latest_mtime(os.path.join(DOWNLOAD_DIR, "*.xlsx"))
+
         export_order_btn = wait.until(EC.presence_of_element_located((By.ID, "btnExportOrder")))
         driver.execute_script("arguments[0].click();", export_order_btn)
         logger.info("Clicked Start Export for Order Template")
 
-        order_template_file = _wait_for_new_xlsx(DOWNLOAD_DIR, timeout=240)
+        order_template_file = _wait_for_new_xlsx(DOWNLOAD_DIR, since_mtime=before, timeout=300)
         logger.info(f"Order template downloaded: {order_template_file}")
 
         # ---------------- EXPORT CATALOGUE ----------------
-        export_catalogue_link = wait.until(EC.presence_of_element_located((By.LINK_TEXT, "EXPORT CATALOGUE")))
+        before = _latest_mtime(os.path.join(DOWNLOAD_DIR, "*.xlsx"))
+
+        export_catalogue_link = wait.until(
+            EC.presence_of_element_located((By.LINK_TEXT, "EXPORT CATALOGUE"))
+        )
         driver.execute_script("arguments[0].click();", export_catalogue_link)
         logger.info("Clicked EXPORT CATALOGUE")
 
@@ -148,7 +192,7 @@ def run():
         driver.execute_script("arguments[0].click();", start_catalogue_btn)
         logger.info("Clicked START EXPORT for Catalogue")
 
-        catalogue_file = _wait_for_new_xlsx(DOWNLOAD_DIR, timeout=300)
+        catalogue_file = _wait_for_new_xlsx(DOWNLOAD_DIR, since_mtime=before, timeout=420)
         logger.info(f"Catalogue downloaded: {catalogue_file}")
 
         result = {
@@ -166,3 +210,9 @@ def run():
             driver.quit()
         except Exception:
             pass
+
+
+if __name__ == "__main__":
+    # Running directly for debug
+    out = run()
+    print(out)
