@@ -13,18 +13,21 @@ OCS automation (Ubuntu 24.04.3 LTS compatible):
 - Saves both into config.settings.DOWNLOAD_DIR
 - Logs to config.settings.logger
 
-Key reliability fixes for Ubuntu 24.04 headless:
+Reliability fixes for Ubuntu 24.04 headless:
 - Explicit Chrome binary_location: /usr/bin/google-chrome-stable
-- Stability flags: --headless=new, --no-sandbox, --disable-dev-shm-usage, etc.
-- Writable profile: --user-data-dir=/tmp/...
-- Remote debugging port: --remote-debugging-port=9222
-- Uses system chromedriver explicitly: /usr/bin/chromedriver
+- Unique, writable profile dir per run (prevents profile lock / corruption across runs)
+- Avoid fixed remote debugging port collisions using --remote-debugging-pipe
+- ChromeDriver logging to /tmp/chromedriver.log for root-cause visibility
+- Uses system chromedriver explicitly: /usr/bin/chromedriver (keep if you want)
 """
 
 import os
 import sys
 import time
 import glob
+import tempfile
+import shutil
+import atexit
 from pathlib import Path
 
 # ---- Ensure repo root is on sys.path (prevents "No module named config") ----
@@ -45,6 +48,7 @@ from config.secrets import OCS_EMAIL, OCS_PASSWORD
 OCS_SIGNIN_URL = "https://www.ocswholesale.ca/Admin/Signin"
 CHROME_BIN = "/usr/bin/google-chrome-stable"
 CHROMEDRIVER_BIN = "/usr/bin/chromedriver"
+CHROMEDRIVER_LOG = "/tmp/chromedriver.log"
 
 
 def _assert_creds() -> None:
@@ -100,9 +104,20 @@ def _make_driver(download_dir: str) -> webdriver.Chrome:
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1920,1080")
 
-    # Fix common crash: "DevToolsActivePort file doesn't exist"
-    opts.add_argument("--user-data-dir=/tmp/ocs-chrome-profile")
-    opts.add_argument("--remote-debugging-port=9222")
+    # Critical reliability fixes:
+    # 1) Unique profile dir per run (prevents "session not created" from profile locks)
+    # 2) Use debugging pipe (prevents fixed-port collisions like 9222)
+    # Use /var/tmp if /tmp is mounted noexec; /tmp is usually fine.
+    profile_parent = "/var/tmp" if os.path.isdir("/var/tmp") else "/tmp"
+    profile_dir = tempfile.mkdtemp(prefix="ocs-chrome-profile-", dir=profile_parent)
+    opts.add_argument(f"--user-data-dir={profile_dir}")
+    opts.add_argument("--remote-debugging-pipe")
+
+    # Optional hardening (often helps on minimal servers)
+    opts.add_argument("--no-first-run")
+    opts.add_argument("--no-default-browser-check")
+    opts.add_argument("--disable-background-networking")
+    opts.add_argument("--disable-breakpad")
 
     # Download behavior
     opts.add_experimental_option(
@@ -115,8 +130,15 @@ def _make_driver(download_dir: str) -> webdriver.Chrome:
         },
     )
 
-    service = Service(CHROMEDRIVER_BIN)
-    return webdriver.Chrome(service=service, options=opts)
+    # Log chromedriver output for diagnosing startup failures
+    service = Service(CHROMEDRIVER_BIN, log_output=CHROMEDRIVER_LOG)
+
+    driver = webdriver.Chrome(service=service, options=opts)
+
+    # Ensure profile is cleaned up at process exit
+    atexit.register(lambda: shutil.rmtree(profile_dir, ignore_errors=True))
+
+    return driver
 
 
 def run() -> dict:
@@ -215,6 +237,8 @@ def run() -> dict:
             driver.quit()
         except Exception:
             pass
+        # If you want to debug failures, check:
+        #   tail -200 /tmp/chromedriver.log
 
 
 if __name__ == "__main__":
