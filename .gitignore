@@ -1,0 +1,6 @@
+data/
+logs/*.log
+config/secrets.py
+.env
+*.xlsx
+__pycache__/
