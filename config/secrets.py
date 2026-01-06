@@ -1,4 +1,5 @@
 import os
+### To real ones
 
 COVA_CLIENT_ID = os.getenv("COVA_CLIENT_ID")
 COVA_CLIENT_SECRET = os.getenv("COVA_CLIENT_SECRET")
