@@ -15,6 +15,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+from selenium.webdriver.chrome.service import Service
+
 from config.settings import DOWNLOAD_DIR, logger
 from config.secrets import OCS_EMAIL, OCS_PASSWORD
 
