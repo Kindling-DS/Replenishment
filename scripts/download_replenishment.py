@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """
-download_replenishment.py
+scripts/download_replenishment.py
 
-OCS automation:
+OCS automation (Ubuntu 24.04.3 LTS compatible):
+- Launches Google Chrome Stable headless
 - Logs into https://www.ocswholesale.ca/Admin/Signin
 - Selects store portal
 - Opens cart
-- Downloads:
+- Downloads TWO Excel files:
     1) Order Template (btnExportOrder)
     2) Catalogue (EXPORT CATALOGUE -> START EXPORT)
-- Saves both Excel files into config.settings.DOWNLOAD_DIR
+- Saves both into config.settings.DOWNLOAD_DIR
+- Logs to config.settings.logger
 
-Ubuntu 24.04 LTS notes:
-- This is designed to work reliably with Google Chrome (.deb) installed:
-    /usr/bin/google-chrome
-- Uses Selenium Manager (Selenium 4.6+) to resolve the matching driver automatically.
+Key reliability fixes for Ubuntu 24.04 headless:
+- Explicit Chrome binary_location: /usr/bin/google-chrome-stable
+- Stability flags: --headless=new, --no-sandbox, --disable-dev-shm-usage, etc.
+- Writable profile: --user-data-dir=/tmp/...
+- Remote debugging port: --remote-debugging-port=9222
+- Uses system chromedriver explicitly: /usr/bin/chromedriver
 """
 
 import os
@@ -23,12 +27,13 @@ import time
 import glob
 from pathlib import Path
 
-# ---- Ensure project root is on sys.path (fixes "No module named config") ----
+# ---- Ensure repo root is on sys.path (prevents "No module named config") ----
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -38,6 +43,8 @@ from config.secrets import OCS_EMAIL, OCS_PASSWORD
 
 
 OCS_SIGNIN_URL = "https://www.ocswholesale.ca/Admin/Signin"
+CHROME_BIN = "/usr/bin/google-chrome-stable"
+CHROMEDRIVER_BIN = "/usr/bin/chromedriver"
 
 
 def _assert_creds() -> None:
@@ -49,21 +56,23 @@ def _assert_creds() -> None:
 
 
 def _latest_mtime(path_glob: str) -> float:
+    """Return latest mtime among matches, or 0 if none exist."""
     paths = glob.glob(path_glob)
-    return max((os.path.getmtime(p) for p in paths), default=0.0)
+    if not paths:
+        return 0.0
+    return max(os.path.getmtime(p) for p in paths)
 
 
 def _wait_for_new_xlsx(download_dir: str, since_mtime: float, timeout: int = 240) -> str:
     """
-    Wait until a NEW .xlsx appears in download_dir after since_mtime, and download completes
-    (no *.crdownload present).
-    Returns full path to the newest completed xlsx.
+    Wait until a NEW .xlsx appears in download_dir after since_mtime and completes
+    (no *.crdownload exists). Returns full path to newest completed xlsx.
     """
     start = time.time()
     while time.time() - start < timeout:
         time.sleep(1)
 
-        # Chrome temp downloads
+        # If Chrome is still writing, skip
         if glob.glob(os.path.join(download_dir, "*.crdownload")):
             continue
 
@@ -82,24 +91,20 @@ def _make_driver(download_dir: str) -> webdriver.Chrome:
     os.makedirs(download_dir, exist_ok=True)
 
     opts = Options()
+    opts.binary_location = CHROME_BIN
 
-    # Prefer Google Chrome .deb on Ubuntu 24.04 (more stable than Snap Chromium for Selenium)
-    # If you don't have it installed, run:
-    #   sudo apt install ./google-chrome-stable_current_amd64.deb
-    opts.binary_location = "/usr/bin/google-chrome"
-
-    # Headless stability flags
+    # Headless + stability flags for Ubuntu 24.04
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1920,1080")
 
-    # Fix common "DevToolsActivePort file doesn't exist" by using a writable profile
+    # Fix common crash: "DevToolsActivePort file doesn't exist"
     opts.add_argument("--user-data-dir=/tmp/ocs-chrome-profile")
     opts.add_argument("--remote-debugging-port=9222")
 
-    # Downloads
+    # Download behavior
     opts.add_experimental_option(
         "prefs",
         {
@@ -110,8 +115,8 @@ def _make_driver(download_dir: str) -> webdriver.Chrome:
         },
     )
 
-    # Selenium Manager will resolve a compatible chromedriver automatically.
-    return webdriver.Chrome(options=opts)
+    service = Service(CHROMEDRIVER_BIN)
+    return webdriver.Chrome(service=service, options=opts)
 
 
 def run() -> dict:
@@ -213,6 +218,5 @@ def run() -> dict:
 
 
 if __name__ == "__main__":
-    # Running directly for debug
     out = run()
     print(out)
