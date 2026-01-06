@@ -2,6 +2,6 @@
 
 ## Setup
 ```bash
-git clone https://github.com/your-org/ocs-replenishment.git
+git clone https://github.com/Kindling-DS/Replenishment.git
 cd ocs-replenishment
 pip install -r requirements.txt
