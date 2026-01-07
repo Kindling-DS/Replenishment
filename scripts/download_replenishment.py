@@ -2,10 +2,11 @@
 """
 scripts/download_replenishment.py
 
-OCS automation (Ubuntu 24.04.3 LTS compatible):
+OCS automation (Ubuntu 24.04 LTS compatible):
 - Launches Google Chrome Stable headless
 - Logs into https://www.ocswholesale.ca/Admin/Signin
-- Selects store portal
+- Dismisses notifications ("DISMISS ALL") if present
+- Ensures you are inside portal (handles store selection page OR already-in-portal)
 - Opens cart
 - Downloads TWO Excel files:
     1) Order Template (btnExportOrder)
@@ -15,10 +16,10 @@ OCS automation (Ubuntu 24.04.3 LTS compatible):
 
 Reliability fixes for Ubuntu 24.04 headless:
 - Explicit Chrome binary_location: /usr/bin/google-chrome-stable
-- Unique, writable profile dir per run (prevents profile lock / corruption across runs)
-- Avoid fixed remote debugging port collisions using --remote-debugging-pipe
-- ChromeDriver logging to /tmp/chromedriver.log for root-cause visibility
-- Uses system chromedriver explicitly: /usr/bin/chromedriver (keep if you want)
+- Explicit chromedriver: /usr/bin/chromedriver
+- Unique, writable profile dir per run (prevents profile lock/corruption)
+- Avoid fixed debugging port collisions with --remote-debugging-pipe
+- ChromeDriver logging to /tmp/chromedriver.log
 """
 
 import os
@@ -30,19 +31,21 @@ import shutil
 import atexit
 from pathlib import Path
 
-# ---- Ensure repo root is on sys.path (prevents "No module named config") ----
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 
-from config.settings import DOWNLOAD_DIR, logger
-from config.secrets import OCS_EMAIL, OCS_PASSWORD
+
+# ---- Ensure repo root is on sys.path (prevents "No module named config") ----
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from config.settings import DOWNLOAD_DIR, logger  # noqa: E402
+from config.secrets import OCS_EMAIL, OCS_PASSWORD  # noqa: E402
 
 
 OCS_SIGNIN_URL = "https://www.ocswholesale.ca/Admin/Signin"
@@ -60,7 +63,6 @@ def _assert_creds() -> None:
 
 
 def _latest_mtime(path_glob: str) -> float:
-    """Return latest mtime among matches, or 0 if none exist."""
     paths = glob.glob(path_glob)
     if not paths:
         return 0.0
@@ -91,6 +93,93 @@ def _wait_for_new_xlsx(download_dir: str, since_mtime: float, timeout: int = 240
     raise TimeoutError(f"Download did not complete within {timeout} seconds")
 
 
+def _dump_debug(driver: webdriver.Chrome, prefix: str) -> None:
+    """
+    Writes debug HTML + screenshot into DOWNLOAD_DIR.
+    """
+    try:
+        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+        html_path = os.path.join(DOWNLOAD_DIR, f"{prefix}.html")
+        png_path = os.path.join(DOWNLOAD_DIR, f"{prefix}.png")
+
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+
+        driver.save_screenshot(png_path)
+        logger.error(f"Saved debug HTML: {html_path}")
+        logger.error(f"Saved debug screenshot: {png_path}")
+    except Exception as e:
+        logger.error(f"Failed to write debug artifacts: {e}")
+
+
+def _dismiss_notifications_if_present(driver: webdriver.Chrome, wait_seconds: int = 6) -> bool:
+    """
+    Clicks notifications 'DISMISS ALL' if present. Non-fatal if not present.
+    """
+    short_wait = WebDriverWait(driver, wait_seconds)
+    locators = [
+        (By.XPATH, "//button[normalize-space()='DISMISS ALL']"),
+        (By.XPATH, "//a[normalize-space()='DISMISS ALL']"),
+        # case-insensitive fallback
+        (
+            By.XPATH,
+            "//button[contains(translate(., 'abcdefghijklmnopqrstuvwxyz','ABCDEFGHIJKLMNOPQRSTUVWXYZ'),'DISMISS ALL')]",
+        ),
+        (
+            By.XPATH,
+            "//a[contains(translate(., 'abcdefghijklmnopqrstuvwxyz','ABCDEFGHIJKLMNOPQRSTUVWXYZ'),'DISMISS ALL')]",
+        ),
+    ]
+
+    for by, sel in locators:
+        try:
+            btn = short_wait.until(EC.element_to_be_clickable((by, sel)))
+            driver.execute_script("arguments[0].click();", btn)
+            return True
+        except TimeoutException:
+            continue
+        except Exception:
+            continue
+
+    return False
+
+
+def _ensure_in_portal(driver: webdriver.Chrome, wait: WebDriverWait) -> None:
+    """
+    After login, you can land on either:
+      A) Store selection page: hdnShortAddress + SELECT + btnSubmit
+      B) Already inside portal: Place Order link exists (/sales/StartOrder)
+
+    This function detects which state you're in and gets you into the portal.
+    """
+    portal_marker = (
+        By.XPATH,
+        "//a[contains(@href,'/sales/StartOrder') and normalize-space()='Place Order']",
+    )
+    store_marker = (By.ID, "hdnShortAddress")
+
+    try:
+        WebDriverWait(driver, 25).until(
+            lambda d: d.find_elements(*portal_marker) or d.find_elements(*store_marker)
+        )
+    except TimeoutException:
+        raise TimeoutException(
+            f"Neither portal marker nor store-selection marker appeared. URL={driver.current_url} TITLE={driver.title}"
+        )
+
+    # If already in portal, nothing to do
+    if driver.find_elements(*portal_marker):
+        return
+
+    # Otherwise, handle store selection flow
+    wait.until(EC.presence_of_element_located(store_marker))
+    wait.until(EC.element_to_be_clickable((By.LINK_TEXT, "SELECT"))).click()
+    wait.until(EC.element_to_be_clickable((By.ID, "btnSubmit"))).click()
+
+    # Confirm portal loaded
+    wait.until(EC.presence_of_element_located(portal_marker))
+
+
 def _make_driver(download_dir: str) -> webdriver.Chrome:
     os.makedirs(download_dir, exist_ok=True)
 
@@ -104,16 +193,13 @@ def _make_driver(download_dir: str) -> webdriver.Chrome:
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1920,1080")
 
-    # Critical reliability fixes:
-    # 1) Unique profile dir per run (prevents "session not created" from profile locks)
-    # 2) Use debugging pipe (prevents fixed-port collisions like 9222)
-    # Use /var/tmp if /tmp is mounted noexec; /tmp is usually fine.
+    # Unique profile dir per run
     profile_parent = "/var/tmp" if os.path.isdir("/var/tmp") else "/tmp"
     profile_dir = tempfile.mkdtemp(prefix="ocs-chrome-profile-", dir=profile_parent)
     opts.add_argument(f"--user-data-dir={profile_dir}")
     opts.add_argument("--remote-debugging-pipe")
 
-    # Optional hardening (often helps on minimal servers)
+    # Optional hardening
     opts.add_argument("--no-first-run")
     opts.add_argument("--no-default-browser-check")
     opts.add_argument("--disable-background-networking")
@@ -130,12 +216,10 @@ def _make_driver(download_dir: str) -> webdriver.Chrome:
         },
     )
 
-    # Log chromedriver output for diagnosing startup failures
     service = Service(CHROMEDRIVER_BIN, log_output=CHROMEDRIVER_LOG)
-
     driver = webdriver.Chrome(service=service, options=opts)
 
-    # Ensure profile is cleaned up at process exit
+    # Cleanup profile dir on exit
     atexit.register(lambda: shutil.rmtree(profile_dir, ignore_errors=True))
 
     return driver
@@ -155,7 +239,7 @@ def run() -> dict:
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
     driver = _make_driver(DOWNLOAD_DIR)
-    wait = WebDriverWait(driver, 30)
+    wait = WebDriverWait(driver, 45)
 
     try:
         # ---------------- LOGIN ----------------
@@ -167,32 +251,56 @@ def run() -> dict:
         driver.find_element(By.ID, "btnLogin").click()
         logger.info("Submitted login form")
 
-        # ---------------- SELECT STORE ----------------
-        wait.until(EC.presence_of_element_located((By.ID, "hdnShortAddress")))
-        store_address = driver.find_element(By.ID, "hdnShortAddress").get_attribute("value")
-        logger.info(f"Store address detected: {store_address}")
-
-        wait.until(EC.element_to_be_clickable((By.LINK_TEXT, "SELECT"))).click()
-        logger.info("Clicked SELECT")
-
-        wait.until(EC.element_to_be_clickable((By.ID, "btnSubmit"))).click()
-        logger.info("Clicked store portal submit")
-
-        # Open cart
-        cart_button = wait.until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "#btnCartWithItemCount.shopping-icn.active")
+        # Give page a moment to render UI
+        try:
+            WebDriverWait(driver, 10).until(
+                lambda d: d.execute_script("return document.readyState") == "complete"
             )
-        )
-        driver.execute_script("arguments[0].click();", cart_button)
-        logger.info("Opened active cart")
+        except Exception:
+            pass
+
+        # ---------------- NOTIFICATIONS ----------------
+        if _dismiss_notifications_if_present(driver, wait_seconds=8):
+            logger.info("Notifications dismissed (DISMISS ALL clicked)")
+        else:
+            logger.info("No notifications popup detected (or not clickable)")
+
+        # ---------------- ENSURE PORTAL ----------------
+        try:
+            _ensure_in_portal(driver, wait)
+            logger.info("In portal")
+        except Exception as e:
+            logger.error(f"Failed to reach portal: {e}")
+            _dump_debug(driver, "debug_after_login_or_portal")
+            raise
+
+        # ---------------- OPEN CART ----------------
+        cart_selectors = [
+            (By.CSS_SELECTOR, "#btnCartWithItemCount.shopping-icn.active"),
+            (By.CSS_SELECTOR, "#btnCartWithItemCount"),
+        ]
+
+        cart_btn = None
+        for sel in cart_selectors:
+            try:
+                cart_btn = WebDriverWait(driver, 15).until(EC.presence_of_element_located(sel))
+                break
+            except TimeoutException:
+                continue
+
+        if not cart_btn:
+            _dump_debug(driver, "debug_cart_not_found")
+            raise TimeoutException("Cart button not found (active or generic)")
+
+        driver.execute_script("arguments[0].click();", cart_btn)
+        logger.info("Cart opened")
 
         # ---------------- EXPORT ORDER TEMPLATE ----------------
         before = _latest_mtime(os.path.join(DOWNLOAD_DIR, "*.xlsx"))
 
         export_order_btn = wait.until(EC.presence_of_element_located((By.ID, "btnExportOrder")))
         driver.execute_script("arguments[0].click();", export_order_btn)
-        logger.info("Clicked Start Export for Order Template")
+        logger.info("Clicked Export Order Template")
 
         order_template_file = _wait_for_new_xlsx(DOWNLOAD_DIR, since_mtime=before, timeout=300)
         logger.info(f"Order template downloaded: {order_template_file}")
@@ -212,7 +320,7 @@ def run() -> dict:
             EC.element_to_be_clickable(
                 (
                     By.XPATH,
-                    "//div[@id='modalExportCataloge']//a[contains(@class,'btn-primary') and contains(text(),'START EXPORT')]",
+                    "//div[@id='modalExportCataloge']//a[contains(@class,'btn-primary') and contains(translate(.,'abcdefghijklmnopqrstuvwxyz','ABCDEFGHIJKLMNOPQRSTUVWXYZ'),'START EXPORT')]",
                 )
             )
         )
@@ -237,7 +345,7 @@ def run() -> dict:
             driver.quit()
         except Exception:
             pass
-        # If you want to debug failures, check:
+        # Debug chromedriver startup/logins:
         #   tail -200 /tmp/chromedriver.log
 
 
