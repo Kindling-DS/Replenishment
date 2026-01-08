@@ -159,9 +159,17 @@ def run():
     logger.info("Sales data prepared")
 
     # ---------------- LOAD MASTER FILES ----------------
-    assortment_df = pd.read_excel(
-        os.path.join(MASTER_DIR, "STORE ITEM COMBINATION MASTER FILE (20).xlsx")
-    )
+    assortment_path = os.path.join(MASTER_DIR, "STORE ITEM COMBINATION MASTER FILE (20).xlsx")
+    if not os.path.exists(assortment_path):
+        raise FileNotFoundError(f"Missing master file: {assortment_path}")
+    assortment_df = pd.read_excel(assortment_path)
+    
+    delist_path = os.path.join(MASTER_DIR, "Overall_Delist.xlsx")
+    if not os.path.exists(delist_path):
+        raise FileNotFoundError(f"Missing delist file: {delist_path}")
+    delist_df = pd.read_excel(delist_path)
+    
+    # ---------------- LOAD LATEST DOWNLOADED FILES ----------------
     download_files = os.listdir(DOWNLOAD_DIR)
     
     # Catalogue: support both "OCS_Catalogue" and "OCS_Catalog" naming
