@@ -401,46 +401,89 @@ def run():
     combined.to_excel(combined_file, index=False)
     logger.info(f"Wrote combined location-aware output: {combined_file}")
 
-    # Build per-location OrderExport template outputs
+    # ---------------- FINAL ORDEREXPORT (MERGED) ----------------
+    # Output: one file matching OrderExport template + a Location column at far right.
+    
     template_cols = list(ocs_export_df.columns)
+    
     if "SKU" not in template_cols:
         raise KeyError(f"OrderExport template missing 'SKU' column. Columns: {template_cols}")
     if "Quantity" not in template_cols:
         raise KeyError(f"OrderExport template missing 'Quantity' column. Columns: {template_cols}")
-
-    per_location_paths: dict[str, str] = {}
-
-    for loc in sorted(combined["Location"].unique()):
+    
+    # Ensure template SKUs are normalized for matching
+    template_base = ocs_export_df.copy()
+    template_base["SKU"] = template_base["SKU"].astype(str).str.strip().str.lower()
+    
+    # Build a single merged OrderExport-format output across all locations
+    all_location_exports = []
+    
+    # We use Supplier SKU (OCS Variant Number) as the matching SKU for the OrderExport template
+    # Quantity = Packs to Order (your computed value)
+    for loc in sorted(combined["Location"].dropna().unique()):
         loc_rows = combined[combined["Location"] == loc].copy()
-
-        # Map template SKU -> quantity using Supplier SKU (OCS variant)
+    
+        # Map to template SKU format
         loc_rows["SKU"] = loc_rows["Supplier SKU"].astype(str).str.strip().str.lower()
-        qty_map = loc_rows.set_index("SKU")["Packs to Order"].to_dict()
-
-        loc_export = ocs_export_df.copy()
-        loc_export["SKU"] = loc_export["SKU"].astype(str).str.strip().str.lower()
-
-        # Add missing SKUs not present in template
+        loc_rows["Quantity"] = pd.to_numeric(loc_rows["Packs to Order"], errors="coerce").fillna(0).astype(int)
+    
+        # Remove zeros / NaNs from computed side first
+        loc_rows = loc_rows[loc_rows["Quantity"] > 0]
+    
+        # If nothing to order for this location, skip
+        if loc_rows.empty:
+            continue
+    
+        qty_map = loc_rows.set_index("SKU")["Quantity"].to_dict()
+    
+        # Start from a fresh template copy each location
+        loc_export = template_base.copy()
+    
+        # Add missing SKUs (present in computed list but not present in template)
         missing = sorted(set(qty_map.keys()) - set(loc_export["SKU"]))
         if missing:
             add_df = pd.DataFrame({c: [np.nan] * len(missing) for c in template_cols})
             add_df["SKU"] = missing
             add_df["Quantity"] = 0
             loc_export = pd.concat([loc_export, add_df], ignore_index=True)
-
-        loc_export["Quantity"] = loc_export["SKU"].map(qty_map).fillna(0).astype(int)
-        loc_export = loc_export[loc_export["Quantity"] > 0]
-
-        loc_file = os.path.join(
-            OUTPUT_DIR,
-            f"OrderExport_{_safe_loc_filename(loc)}_{datetime.today().strftime('%Y%m%d')}.xlsx"
+    
+        # Update Quantity
+        loc_export["Quantity"] = (
+            loc_export["SKU"].map(qty_map).fillna(0).astype(int)
         )
-        loc_export.to_excel(loc_file, index=False)
-        per_location_paths[loc] = loc_file
-        logger.info(f"Wrote OrderExport for {loc}: {loc_file}")
-
-    logger.info(f"Replenishment processing completed. Outputs: {len(per_location_paths)} locations")
-
+    
+        # Remove rows where quantity is 0
+        loc_export = loc_export[loc_export["Quantity"] > 0].copy()
+    
+        # Add Location at the far right
+        loc_export["Location"] = loc
+    
+        # Enforce column order: template columns first, then Location at the end
+        loc_export = loc_export[template_cols + ["Location"]]
+    
+        all_location_exports.append(loc_export)
+    
+    # Merge all locations into one final file
+    if not all_location_exports:
+        raise RuntimeError("No orders generated: all locations resulted in Quantity=0 after filtering.")
+    
+    final_orderexport = pd.concat(all_location_exports, ignore_index=True)
+    
+    # Save: same format as OrderExport template, with Location appended
+    final_orderexport_path = os.path.join(
+        OUTPUT_DIR,
+        f"OrderExport_ALL_LOCATIONS_{datetime.today().strftime('%Y%m%d')}.xlsx"
+    )
+    final_orderexport.to_excel(final_orderexport_path, index=False)
+    logger.info(f"Wrote final merged OrderExport with Location: {final_orderexport_path}")
+    
+    # OPTIONAL: if you also want final_#### to be the same file, write a second copy
+    final_sameformat_path = os.path.join(
+        OUTPUT_DIR,
+        f"final_{datetime.today().strftime('%Y%m%d')}.xlsx"
+    )
+    final_orderexport.to_excel(final_sameformat_path, index=False)
+    logger.info(f"Wrote final_#### in OrderExport format: {final_sameformat_path}")
 
 if __name__ == "__main__":
     run()
