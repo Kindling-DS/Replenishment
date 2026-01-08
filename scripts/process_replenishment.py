@@ -162,15 +162,41 @@ def run():
     assortment_df = pd.read_excel(
         os.path.join(MASTER_DIR, "STORE ITEM COMBINATION MASTER FILE (20).xlsx")
     )
-
-    ocs_catalog_df = pd.read_excel(
-        sorted(f for f in os.listdir(DOWNLOAD_DIR) if "OCS_Catalogue" in f)[-1]
+    download_files = os.listdir(DOWNLOAD_DIR)
+    
+    # Catalogue: support both "OCS_Catalogue" and "OCS_Catalog" naming
+    catalog_candidates = [
+        f for f in download_files
+        if f.lower().endswith(".xlsx") and ("ocs_catalogue" in f.lower() or "ocs_catalog" in f.lower())
+    ]
+    if not catalog_candidates:
+        raise FileNotFoundError(
+            f"No OCS catalogue .xlsx found in {DOWNLOAD_DIR}. Files: {download_files}"
+        )
+    
+    latest_catalog_file = max(
+        catalog_candidates,
+        key=lambda f: os.path.getmtime(os.path.join(DOWNLOAD_DIR, f))
     )
-
-    delist_df = pd.read_excel(os.path.join(MASTER_DIR, "Overall_Delist.xlsx"))
-    ocs_export_df = pd.read_excel(
-        sorted(f for f in os.listdir(DOWNLOAD_DIR) if "OrderExport" in f)[-1]
+    latest_catalog_path = os.path.join(DOWNLOAD_DIR, latest_catalog_file)
+    ocs_catalog_df = pd.read_excel(latest_catalog_path)
+    
+    # Order export
+    export_candidates = [
+        f for f in download_files
+        if f.lower().endswith(".xlsx") and "orderexport" in f.lower()
+    ]
+    if not export_candidates:
+        raise FileNotFoundError(
+            f"No OrderExport .xlsx found in {DOWNLOAD_DIR}. Files: {download_files}"
+        )
+    
+    latest_export_file = max(
+        export_candidates,
+        key=lambda f: os.path.getmtime(os.path.join(DOWNLOAD_DIR, f))
     )
+    latest_export_path = os.path.join(DOWNLOAD_DIR, latest_export_file)
+    ocs_export_df = pd.read_excel(latest_export_path)
 
     # ---------------- CALCULATIONS ----------------
     merged = pd.merge(
